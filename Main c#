@@ -1,0 +1,126 @@
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.DependencyInjection;
+using Newtonsoft.Json;
+
+public class User
+{
+    public int Id { get; set; }
+    public string Email { get; set; }
+    public string Name { get; set; }
+    public string Password { get; set; }
+    public decimal Wallet { get; set; }
+}
+
+public class Transaction
+{
+    public int Id { get; set; }
+    public int UserId { get; set; }
+    public string Type { get; set; } // "buy" or "sell"
+    public decimal Amount { get; set; }
+    public DateTime Timestamp { get; set; }
+}
+
+public class Program
+{
+    public static void Main(string[] args)
+    {
+        var builder = WebApplication.CreateBuilder(args);
+
+        builder.Services.AddSingleton<IDbConnection>(sp =>
+            new SqlConnection("YourConnectionStringHere"));
+        builder.Services.AddControllers();
+
+        var app = builder.Build();
+
+        app.MapPost("/user/signup", async ([FromBody] User user, [FromServices] IDbConnection db) =>
+        {
+            user.Wallet = 0;
+            string query = "INSERT INTO Users (Email, Name, Password, Wallet) VALUES (@Email, @Name, @Password, @Wallet)";
+            await db.ExecuteAsync(query, user);
+            return Results.Ok("User signed up successfully.");
+        });
+
+        app.MapPost("/user/login", async ([FromBody] User user, [FromServices] IDbConnection db) =>
+        {
+            string query = "SELECT * FROM Users WHERE Name = @Name AND Password = @Password";
+            var result = await db.QueryFirstOrDefaultAsync<User>(query, user);
+            return result != null ? Results.Ok(result) : Results.Unauthorized();
+        });
+
+        app.MapGet("/user/profile", async ([FromQuery] int id, [FromServices] IDbConnection db) =>
+        {
+            string query = "SELECT * FROM Users WHERE Id = @Id";
+            var user = await db.QueryFirstOrDefaultAsync<User>(query, new { Id = id });
+            return user != null ? Results.Ok(user) : Results.NotFound();
+        });
+
+        app.MapGet("/user/profile/wallet", async ([FromQuery] int id, [FromServices] IDbConnection db) =>
+        {
+            string query = "SELECT Wallet FROM Users WHERE Id = @Id";
+            var wallet = await db.QueryFirstOrDefaultAsync<decimal?>(query, new { Id = id });
+            return wallet.HasValue ? Results.Ok(wallet) : Results.NotFound();
+        });
+
+        app.MapPost("/user/profile/wallet/deposit", async ([FromBody] dynamic data, [FromServices] IDbConnection db) =>
+        {
+            int userId = data.id;
+            decimal amount = data.amount;
+            string updateQuery = "UPDATE Users SET Wallet = Wallet + @Amount WHERE Id = @Id";
+            await db.ExecuteAsync(updateQuery, new { Amount = amount, Id = userId });
+            string insertTransaction = "INSERT INTO Transactions (UserId, Type, Amount, Timestamp) VALUES (@UserId, 'deposit', @Amount, @Timestamp)";
+            await db.ExecuteAsync(insertTransaction, new { UserId = userId, Amount = amount, Timestamp = DateTime.UtcNow });
+            return Results.Ok("Deposit successful.");
+        });
+
+        app.MapPost("/user/profile/wallet/withdraw", async ([FromBody] dynamic data, [FromServices] IDbConnection db) =>
+        {
+            int userId = data.id;
+            decimal amount = data.amount;
+            string query = "UPDATE Users SET Wallet = Wallet - @Amount WHERE Id = @Id AND Wallet >= @Amount";
+            int affectedRows = await db.ExecuteAsync(query, new { Amount = amount, Id = userId });
+            if (affectedRows > 0)
+            {
+                string insertTransaction = "INSERT INTO Transactions (UserId, Type, Amount, Timestamp) VALUES (@UserId, 'withdraw', @Amount, @Timestamp)";
+                await db.ExecuteAsync(insertTransaction, new { UserId = userId, Amount = amount, Timestamp = DateTime.UtcNow });
+                return Results.Ok("Withdraw successful.");
+            }
+            return Results.BadRequest("Insufficient funds.");
+        });
+
+        app.MapGet("/user/transaction-history", async ([FromQuery] int userId, [FromServices] IDbConnection db) =>
+        {
+            string query = "SELECT * FROM Transactions WHERE UserId = @UserId";
+            var transactions = await db.QueryAsync<Transaction>(query, new { UserId = userId });
+            return Results.Ok(transactions);
+        });
+
+        app.MapGet("/user/transaction-history/buy", async ([FromQuery] int userId, [FromServices] IDbConnection db) =>
+        {
+            string query = "SELECT * FROM Transactions WHERE UserId = @UserId AND Type = 'buy'";
+            var transactions = await db.QueryAsync<Transaction>(query, new { UserId = userId });
+            return Results.Ok(transactions);
+        });
+
+        app.MapGet("/user/transaction-history/sell", async ([FromQuery] int userId, [FromServices] IDbConnection db) =>
+        {
+            string query = "SELECT * FROM Transactions WHERE UserId = @UserId AND Type = 'sell'";
+            var transactions = await db.QueryAsync<Transaction>(query, new { UserId = userId });
+            return Results.Ok(transactions);
+        });
+
+        app.MapPost("/user/change_data", async ([FromBody] User user, [FromServices] IDbConnection db) =>
+        {
+            string query = "UPDATE Users SET Email = @Email, Name = @Name, Password = @Password WHERE Id = @Id";
+            await db.ExecuteAsync(query, user);
+            return Results.Ok("User data updated successfully.");
+        });
+
+        app.Run();
+    }
+}
